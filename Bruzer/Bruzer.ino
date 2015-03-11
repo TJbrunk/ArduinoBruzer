@@ -3,30 +3,27 @@
  *
  * Created: 3/2/2015 1:15:07 PM
  * Author: TBrink
+ Yeast range 15-22*C
  */ 
 
-#include "Wire/Wire.h"
 #include <stdint.h>
-#include <TFT_Touch_Shield_V2-master/TFTv2.h>
-#include <SPI/SPI.h>
+#include "I2C.h"//I2C library downloaded from http://www.dsscircuits.com/articles/arduino-i2c-master-library
 
-const int address = 0x4a; //Address of TC74A2 digital temp sensor
-const int sp_high = 35;//18.33; //in *C (18.33*C = 65*F)
-const int sp = 31;
-const int sp_low = 27;
-const int heater = 12; //pin 13 is the built in LED, SEEED studio relay pin 4-7 == relay 4-1
-const int fridge = 13;
+/***************** I2C addresses for temp sensors  ************************/
+const int ambient = 0x4a;//TC 74a digital temperature sensors from Micro
+const int beer = 0x48;
 
-//byte val = 0; //var to hold value read from i2c bus
-int tempC;
-int tempF;
+/***************** Sketch variables ************************************/
+//Temperature setpoints in *C
+const int sp_high = 21;//ambient air temp 'max'
+const int sp = 19;  //ambient air temp set point
+const int sp_low = 16; //minimum ambient air temp
 
-String cmd;
-String name;
-String val;
+//Temperature Variables
+int temp_ambient;
+int temp_beer;
 
-boolean debugging = true;
-
+//State machine states
 enum State {
 	idle,
 	cooling,
@@ -35,77 +32,82 @@ enum State {
 	heating_db
 } state;
 
+//Fridge and heater are connected to Normally Open relay circuit, so pin values are reversed
 boolean on = LOW;
 boolean off = HIGH;
 
+//Enable (true)/Disable (false) verbose serial output
+boolean debugging = true;
+/********************** Arduino Pins ****************************/
+const int heater = 9; 
+const int fridge = 8;
+
+
 void setup(){
-	Wire.begin();
-	Serial.begin(9600);
+	//enable serial if debugging
+	if (debugging){Serial.begin(9600);};
+	//Set pins & states
 	pinMode(heater, OUTPUT);
 	pinMode(fridge, OUTPUT);
 	digitalWrite(fridge, LOW);
 	digitalWrite(heater, LOW);
-	
-	tempC = read_temp();
-	if (tempC > sp_high){
+	//Start I2C library
+	I2c.begin();
+	//Set a 3 second timeout for I2C data
+	I2c.timeOut(3000);
+	//Set both Temp sensors to read from register 0
+	I2c.write(beer, 0);
+	I2c.write(ambient, 0);
+	//Get current temperatures
+	read_temp();
+	//Set the beginning state based on the temperature
+	if (temp_ambient > sp_high){
 		state = cooling;
 	}
-	if (tempC < sp_low){
+	if (temp_ambient < sp_low){
 		state = heating;
 	}
 	else{
 		state = idle;
 	}
-	Serial.println("\n\n\nSetup Complete.  ");
-	debug_print(tempC);
-//	init_display();
-	delay(2000);
+	if(debugging){
+	  Serial.println("\n\n\nSetup Complete.  ");
+	}
+	debug_print(temp_ambient);
 }
 
 int read_temp(){
-	int temp;
 	
-	//start the transmission
-	Wire.beginTransmission(address);
-
-	//Tell the sensor to send data
-	Wire.write(0);
-
-	Wire.requestFrom(address, 1);
-	for(int i=0; i<10; i++){
-		if (Wire.available()){
-			temp = Wire.read();
-			//tempF = tempC * 1.8 + 32;
-			return temp;
+	
+	I2c.read(beer, 1);
+	for(int i=0; i<10; i++){//Try 10 times for data to become available
+		if (I2c.available()){
+			temp_beer = I2c.receive();
 		}
+		delay(5);
 	}
-	//    Serial.print("Current temp : ");
+	
+	I2c.read(ambient, 1);//Get the temperature
+	for(int i=0; i<10; i++){//Try 10 times for data to become available
+		if (I2c.available()){
+			temp_ambient = I2c.receive();
+			return 0;//break out of FN once complete
+		}
+		delay(5);
+	}
+	//If data wasn't available after 10 attempts, Print an error, and set the state to idle
 	Serial.println("ERROR READING TEMP");
-	return sp;
+	state = idle;
+	temp_ambient = sp;
+	return 0;
 }
-
-/*void init_display(){
-	
-	TFT_BL_ON;      // turn on the background light
-	
-	//Draw the increase & decrease SP buttons
-	Tft.fillRectangle(166, 0, 74, 160, RED);
-	Tft.fillRectangle(165, 160, 75, 160, BLUE);
-	
-	//Rotate display for text rendering
-	Tft.setDisplayDirect(DOWN2UP);
-	
-	//Draw text
-	Tft.drawString("Setpoint:", 2, 319, 2, WHITE);
-	Tft.drawString("Temp:", 25, 319, 2, WHITE);
-}*/
 
 void debug_print(int temp){
 	if (debugging)
 	{
-		String sstring = "";
-		String debug = "Temp: ";
-		switch (state){
+		String sstring = "";// local state variable of type string
+		String debug = "Air: ";
+		switch (state){//This just gets the string representation of the state enum and could be improved
 			case idle:
 			sstring = "idle";
 			break;
@@ -127,6 +129,8 @@ void debug_print(int temp){
 		debug += " --- ";
 		debug += "State: ";
 		debug += sstring;
+		debug += " --- Beer: ";
+		debug += temp_beer;
 		Serial.println(debug);
 	}
 }
@@ -134,34 +138,31 @@ void debug_print(int temp){
 
 void loop()
 {
-	
 	switch (state){
-		tempC = read_temp();
+		read_temp();
 		case idle:
-		if (sp_low < tempC && tempC < sp_high){
-			debug_print(tempC);
+		if (sp_low < temp_ambient && temp_ambient < sp_high){
+			debug_print(temp_ambient);
 			digitalWrite(heater, off);
 			digitalWrite(fridge, off);
 			delay(1000);
-			tempC = read_temp();
+			read_temp();
 		}
-		else if (tempC >= sp_high){
+		else if (temp_ambient >= sp_high){
 			state = cooling;
 		}
-		else if (tempC <= sp_low){
+		else if (temp_ambient <= sp_low){
 			state = heating;
 		}
-		
 		break;
 		
-		
 		case cooling:
-		if (tempC >= sp_low){
-			debug_print(tempC);
+		if (temp_ambient >= sp_low){
+			debug_print(temp_ambient);
 			digitalWrite(heater, off);
 			digitalWrite(fridge, on);
 			delay(1000);
-			tempC = read_temp();
+			read_temp();
 		}
 		else{
 			state = cooling_db;
@@ -170,12 +171,12 @@ void loop()
 		
 		
 		case heating:
-		if (tempC <= sp_high){
-			debug_print(tempC);
+		if (temp_ambient <= sp_high){
+			debug_print(temp_ambient);
 			digitalWrite(heater, on);
 			digitalWrite(fridge, off);
 			delay(1000);
-			tempC = read_temp();
+			read_temp();
 		}
 		else{
 			state = heating_db;
@@ -184,12 +185,12 @@ void loop()
 		
 		
 		case cooling_db:
-		if (tempC < sp && tempC > sp_low - 2){
-			debug_print(tempC);
+		if (temp_ambient < sp && temp_ambient > sp_low - 3){
+			debug_print(temp_ambient);
 			digitalWrite(heater, off);
 			digitalWrite(fridge, off);
 			delay(1000);
-			tempC = read_temp();
+			read_temp();
 		}
 		else{
 			state = idle;
@@ -198,12 +199,12 @@ void loop()
 		
 		
 		case heating_db:
-		if (tempC > sp && tempC < sp_high + 2){
-			debug_print(tempC);
+		if (temp_ambient > sp && temp_ambient < sp_high + 3){
+			debug_print(temp_ambient);
 			digitalWrite(heater, off);
 			digitalWrite(fridge, off);
 			delay(1000);
-			tempC = read_temp();
+			read_temp();
 		}
 		else{
 			state = idle;

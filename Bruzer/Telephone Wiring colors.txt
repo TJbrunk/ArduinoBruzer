@@ -1,0 +1,4 @@
+Black == VCC
+Green == Gnd
+Yellow == Data (A4)
+Red == Clk (A5)
